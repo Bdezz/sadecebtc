@@ -6,6 +6,8 @@ import urllib.error
 import threading
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from hdwallet import HDWallet
+from hdwallet.symbols import BTC as BTC_SYMBOL
 
 # ========================================
 # CONFIGURATION
@@ -51,40 +53,123 @@ def get_btc_price():
     return {'success': False, 'error': 'Failed to fetch BTC price'}
 
 # ========================================
-# WALLET BALANCE (Blockchain.info API - Free)
+# WALLET BALANCE (HD Wallet Support)
 # ========================================
+def derive_addresses_from_xpub(xpub, count=20):
+    """xPub'tan adres türet (BIP44: m/0/0 to m/0/count)"""
+    addresses = []
+    
+    try:
+        hdwallet = HDWallet(symbol=BTC_SYMBOL)
+        hdwallet.from_xpublic_key(xpub=xpub)
+        
+        # External chain (m/0/x) - Receiving addresses
+        for i in range(count):
+            hdwallet.from_path(f"m/0/{i}")
+            addresses.append(hdwallet.p2wpkh_address())  # bc1q... (Native SegWit)
+            hdwallet.clean_derivation()
+        
+        print(f"[HD Wallet] Derived {len(addresses)} addresses from xPub")
+        return addresses
+    
+    except Exception as e:
+        print(f"[HD Wallet Error] Failed to derive addresses: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+def get_address_balance_mempool(address):
+    """Mempool.space'ten tek adres bakiyesi çek"""
+    try:
+        url = f"https://mempool.space/api/address/{address}"
+        req = urllib.request.Request(url)
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+            funded = data.get('chain_stats', {}).get('funded_txo_sum', 0)
+            spent = data.get('chain_stats', {}).get('spent_txo_sum', 0)
+            balance = funded - spent
+            
+            return {
+                'balance': balance,
+                'received': funded,
+                'sent': spent
+            }
+    except Exception as e:
+        print(f"[Mempool API] Error for {address}: {e}")
+        return {'balance': 0, 'received': 0, 'sent': 0}
+
 def get_btc_balance():
-    """Blockchain.info'dan BTC bakiyesini çek (xPub veya Address)"""
-    # xPub varsa onu kullan, yoksa tek adresi kullan
+    """BTC bakiyesini çek (xPub veya Address)"""
     wallet_key = BTC_WALLET_XPUB if BTC_WALLET_XPUB else BTC_WALLET_ADDRESS
     
     if not wallet_key:
         return {'success': False, 'error': 'BTC wallet address/xpub not configured'}
     
     try:
-        # Blockchain.info public API (xpub ve address ikisini de destekler)
-        url = f"https://blockchain.info/balance?active={wallet_key}"
-        req = urllib.request.Request(url)
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
+        # xPub için HD Wallet desteği
+        if BTC_WALLET_XPUB:
+            print(f"[HD Wallet] Using xPub: {BTC_WALLET_XPUB[:12]}...")
             
-            # xPub kullanıyorsak, tüm adreslerin toplamını al
-            if wallet_key in data:
-                wallet = data[wallet_key]
-                # Satoshi to BTC conversion (1 BTC = 100,000,000 satoshi)
-                balance_btc = wallet.get('final_balance', 0) / 100000000
+            # xPub'tan ilk 20 adresi türet (gap limit)
+            addresses = derive_addresses_from_xpub(BTC_WALLET_XPUB, count=20)
+            
+            if not addresses:
+                return {'success': False, 'error': 'Failed to derive addresses from xPub'}
+            
+            # Her adresin bakiyesini topla
+            total_balance = 0
+            total_received = 0
+            total_sent = 0
+            active_addresses = []
+            
+            print(f"[HD Wallet] Checking {len(addresses)} addresses...")
+            
+            for addr in addresses:
+                balance_info = get_address_balance_mempool(addr)
                 
-                return {
-                    'success': True,
-                    'balance_btc': balance_btc,
-                    'balance_satoshi': wallet.get('final_balance', 0),
-                    'total_received': wallet.get('total_received', 0) / 100000000,
-                    'total_sent': wallet.get('total_sent', 0) / 100000000,
-                    'wallet_type': 'xPub' if BTC_WALLET_XPUB else 'Address'
-                }
+                if balance_info['balance'] > 0 or balance_info['received'] > 0:
+                    print(f"[HD Wallet] {addr}: {balance_info['balance']} sat")
+                    active_addresses.append(addr)
+                
+                total_balance += balance_info['balance']
+                total_received += balance_info['received']
+                total_sent += balance_info['sent']
+                
+                # Rate limiting (Mempool.space allows ~5 req/s)
+                time.sleep(0.25)
+            
+            print(f"[HD Wallet] Total balance: {total_balance} sat ({len(active_addresses)} active addresses)")
+            
+            return {
+                'success': True,
+                'balance_btc': total_balance / 100000000,
+                'balance_satoshi': total_balance,
+                'total_received': total_received / 100000000,
+                'total_sent': total_sent / 100000000,
+                'wallet_type': 'xPub',
+                'active_addresses': active_addresses
+            }
+        
+        # Tek adres için Mempool.space kullan
+        else:
+            print(f"[Single Address] Using address: {wallet_key[:12]}...")
+            balance_info = get_address_balance_mempool(wallet_key)
+            
+            return {
+                'success': True,
+                'balance_btc': balance_info['balance'] / 100000000,
+                'balance_satoshi': balance_info['balance'],
+                'total_received': balance_info['received'] / 100000000,
+                'total_sent': balance_info['sent'] / 100000000,
+                'wallet_type': 'Address'
+            }
+    
     except Exception as e:
         print(f"[BTC Balance Error] {e}")
+        import traceback
+        traceback.print_exc()
     
     return {'success': False, 'error': 'Failed to fetch wallet balance'}
 
@@ -287,7 +372,9 @@ def handle_btc_balance(ack, command, say):
         
         wallet_display = ""
         if BTC_WALLET_XPUB:
-            wallet_display = f"🔗 **Wallet Type:** xPub (Tüm Adresler)\n"
+            active_count = len(balance_data.get('active_addresses', []))
+            wallet_display = f"🔗 **Wallet Type:** xPub (HD Wallet)\n"
+            wallet_display += f"📍 **Aktif Adres Sayısı:** {active_count}\n"
         elif BTC_WALLET_ADDRESS:
             wallet_display = f"🔗 **Wallet:** `{BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}`\n"
         
