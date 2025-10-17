@@ -31,7 +31,7 @@ app = App(token=SLACK_BOT_TOKEN)
 def get_xmr_price():
     """CoinGecko'dan XMR fiyatını çek (USD, TRY, USDT)"""
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=usd,try,usdt&include_24hr_change=true"
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=monero&vs_currencies=usd,try&include_24hr_change=true"
         req = urllib.request.Request(url)
         
         with urllib.request.urlopen(req, timeout=10) as response:
@@ -39,11 +39,12 @@ def get_xmr_price():
             
             if 'monero' in data:
                 xmr = data['monero']
+                usd_price = xmr.get('usd', 0)
                 return {
                     'success': True,
-                    'usd': xmr.get('usd', 0),
+                    'usd': usd_price,
                     'try': xmr.get('try', 0),
-                    'usdt': xmr.get('usdt', 0),
+                    'usdt': usd_price,  # USDT ≈ USD (stablecoin)
                     'change_24h': xmr.get('usd_24h_change', 0)
                 }
     except Exception as e:
@@ -55,64 +56,25 @@ def get_xmr_price():
 # XMR WALLET BALANCE (XMRChain.net API)
 # ========================================
 def get_xmr_balance():
-    """XMR bakiyesini çek (address + view key)"""
+    """XMR bakiyesini çek - DEMO MODE (Gerçek API entegrasyonu yapılacak)"""
     
     if not XMR_ADDRESS or not XMR_VIEW_KEY:
         return {'success': False, 'error': 'XMR wallet address/view key not configured'}
     
-    try:
-        print(f"[XMR Wallet] Checking address: {XMR_ADDRESS[:8]}...")
-        
-        # XMRChain.net API (view key ile bakiye çeker)
-        url = f"https://xmrchain.net/api/outputsblocks"
-        
-        # POST request with address and view key
-        data = json.dumps({
-            "address": XMR_ADDRESS,
-            "viewkey": XMR_VIEW_KEY,
-            "limit": 1  # Son 1 blok yeterli (sadece bakiye için)
-        }).encode('utf-8')
-        
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={'Content-Type': 'application/json'},
-            method='POST'
-        )
-        
-        with urllib.request.urlopen(req, timeout=15) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            
-            if result.get('status') == 'success':
-                data = result.get('data', {})
-                
-                # XMR atomic units (1 XMR = 1e12 atomic units)
-                total_received = data.get('total_received', 0)
-                total_sent = data.get('total_sent', 0)
-                balance = total_received - total_sent
-                
-                balance_xmr = balance / 1e12
-                received_xmr = total_received / 1e12
-                sent_xmr = total_sent / 1e12
-                
-                print(f"[XMR Wallet] Balance: {balance_xmr:.12f} XMR")
-                
-                return {
-                    'success': True,
-                    'balance_xmr': balance_xmr,
-                    'balance_atomic': balance,
-                    'total_received': received_xmr,
-                    'total_sent': sent_xmr
-                }
-            else:
-                print(f"[XMR API] Error: {result.get('message', 'Unknown error')}")
+    print(f"[XMR Wallet] Demo mode - Wallet configured: {XMR_ADDRESS[:8]}...")
+    print(f"[XMR Wallet] View key configured (read-only)")
     
-    except Exception as e:
-        print(f"[XMR Balance Error] {e}")
-        import traceback
-        traceback.print_exc()
+    # DEMO DATA - Gerçek entegrasyon için MyMonero API veya XMR RPC node gerekiyor
+    # XMRChain.net ve benzeri public API'ler view key kabul etmiyor
     
-    return {'success': False, 'error': 'Failed to fetch XMR wallet balance'}
+    return {
+        'success': True,
+        'balance_xmr': 0.123456789012,  # Demo balance
+        'balance_atomic': 123456789012,
+        'total_received': 1.500000000000,
+        'total_sent': 1.376543210988,
+        'demo_mode': True
+    }
 
 # ========================================
 # LINEAR API CLIENT
@@ -313,6 +275,10 @@ def handle_xmr_balance(ack, command, say):
             try_value = xmr * price_data['try']
             usdt_value = xmr * price_data['usdt']
         
+        demo_warning = ""
+        if balance_data.get('demo_mode'):
+            demo_warning = "\n\n⚠️ **DEMO MODE** - Gerçek bakiye gösterilemiyor\n💡 MyMonero API veya XMR RPC node entegrasyonu gerekiyor"
+        
         say(
             f"💼 **Feather Wallet XMR Bakiyesi**\n\n"
             f"🪙 **XMR:** `{xmr:.12f}` XMR\n\n"
@@ -323,6 +289,7 @@ def handle_xmr_balance(ack, command, say):
             f"📤 **Toplam Gönderilen:** `{sent:.12f}` XMR\n\n"
             f"🔗 **Wallet:** `{XMR_ADDRESS[:8]}...{XMR_ADDRESS[-8:]}`\n"
             f"⏰ **Zaman:** {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"{demo_warning}"
         )
     else:
         say(f"❌ **Bakiye Hatası**\n⚠️ {balance_data.get('error', 'Unknown error')}")
