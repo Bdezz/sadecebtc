@@ -20,6 +20,7 @@ LINEAR_API_KEY = os.getenv("LINEAR_API_KEY")
 LINEAR_TEAM_ID = os.getenv("LINEAR_TEAM_ID")
 CURSOR_AGENT_ID = os.getenv("CURSOR_AGENT_ID", "9bcf804d-d3b7-4a7d-841b-b10108f9f8d0")
 BTC_WALLET_ADDRESS = os.getenv("BTC_WALLET_ADDRESS", "")
+BTC_WALLET_ADDRESSES = os.getenv("BTC_WALLET_ADDRESSES", "")  # Virgülle ayrılmış adresler
 BTC_WALLET_XPUB = os.getenv("BTC_WALLET_XPUB", "")
 
 # ========================================
@@ -55,22 +56,64 @@ def get_btc_price():
 # ========================================
 # WALLET BALANCE (HD Wallet Support)
 # ========================================
-def derive_addresses_from_xpub(xpub, count=20):
-    """xPub'tan adres türet (BIP44: m/0/0 to m/0/count)"""
-    addresses = []
+def derive_addresses_from_xpub(xpub, count=50):
+    """xPub'tan adres türet - Tüm formatları dene"""
+    all_addresses = []
     
     try:
         hdwallet = HDWallet(symbol=BTC_SYMBOL)
-        hdwallet.from_xpublic_key(xpub=xpub)
         
-        # External chain (m/0/x) - Receiving addresses
-        for i in range(count):
-            hdwallet.from_path(f"m/0/{i}")
-            addresses.append(hdwallet.p2wpkh_address())  # bc1q... (Native SegWit)
-            hdwallet.clean_derivation()
+        # xPub tipine göre doğru adresleri üret
+        if xpub.startswith('xpub'):
+            print(f"[HD Wallet] xPub detected - trying Legacy (1...) addresses")
+            hdwallet.from_xpublic_key(xpub=xpub)
+            
+            # Legacy adresleri dene
+            for i in range(count):
+                hdwallet.from_path(f"m/0/{i}")
+                addr = hdwallet.p2pkh_address()  # 1... adresleri
+                all_addresses.append(addr)
+                hdwallet.clean_derivation()
+            
+            # Aynı zamanda Native SegWit'i de dene (bazı wallet'lar xpub ile bc1q üretir)
+            hdwallet2 = HDWallet(symbol=BTC_SYMBOL)
+            hdwallet2.from_xpublic_key(xpub=xpub)
+            
+            print(f"[HD Wallet] Also trying Native SegWit (bc1q...) addresses")
+            for i in range(count):
+                hdwallet2.from_path(f"m/0/{i}")
+                try:
+                    addr = hdwallet2.p2wpkh_address()  # bc1q... adresleri
+                    all_addresses.append(addr)
+                except:
+                    pass
+                hdwallet2.clean_derivation()
         
-        print(f"[HD Wallet] Derived {len(addresses)} addresses from xPub")
-        return addresses
+        elif xpub.startswith('zpub'):
+            print(f"[HD Wallet] zpub detected - using Native SegWit (bc1q...)")
+            hdwallet.from_xpublic_key(xpub=xpub)
+            
+            for i in range(count):
+                hdwallet.from_path(f"m/0/{i}")
+                addr = hdwallet.p2wpkh_address()
+                all_addresses.append(addr)
+                hdwallet.clean_derivation()
+        
+        elif xpub.startswith('ypub'):
+            print(f"[HD Wallet] ypub detected - using SegWit (3...)")
+            hdwallet.from_xpublic_key(xpub=xpub)
+            
+            for i in range(count):
+                hdwallet.from_path(f"m/0/{i}")
+                addr = hdwallet.p2sh_p2wpkh_address()
+                all_addresses.append(addr)
+                hdwallet.clean_derivation()
+        
+        # Duplicate'leri kaldır
+        unique_addresses = list(dict.fromkeys(all_addresses))
+        
+        print(f"[HD Wallet] Derived {len(unique_addresses)} unique addresses from xPub")
+        return unique_addresses
     
     except Exception as e:
         print(f"[HD Wallet Error] Failed to derive addresses: {e}")
@@ -101,70 +144,84 @@ def get_address_balance_mempool(address):
         return {'balance': 0, 'received': 0, 'sent': 0}
 
 def get_btc_balance():
-    """BTC bakiyesini çek (xPub veya Address)"""
-    wallet_key = BTC_WALLET_XPUB if BTC_WALLET_XPUB else BTC_WALLET_ADDRESS
+    """BTC bakiyesini çek (xPub, ADDRESSES veya Address)"""
     
-    if not wallet_key:
+    # Öncelik sırası: BTC_WALLET_ADDRESSES > BTC_WALLET_XPUB > BTC_WALLET_ADDRESS
+    if BTC_WALLET_ADDRESSES:
+        # Virgülle ayrılmış çoklu adres
+        addresses = [addr.strip() for addr in BTC_WALLET_ADDRESSES.split(',') if addr.strip()]
+        wallet_key = f"{len(addresses)} addresses"
+        use_xpub = False
+    elif BTC_WALLET_XPUB:
+        wallet_key = BTC_WALLET_XPUB
+        use_xpub = True
+    elif BTC_WALLET_ADDRESS:
+        addresses = [BTC_WALLET_ADDRESS]
+        wallet_key = BTC_WALLET_ADDRESS
+        use_xpub = False
+    else:
         return {'success': False, 'error': 'BTC wallet address/xpub not configured'}
     
     try:
         # xPub için HD Wallet desteği
-        if BTC_WALLET_XPUB:
+        if use_xpub:
             print(f"[HD Wallet] Using xPub: {BTC_WALLET_XPUB[:12]}...")
             
-            # xPub'tan ilk 20 adresi türet (gap limit)
-            addresses = derive_addresses_from_xpub(BTC_WALLET_XPUB, count=20)
+            # xPub'tan 50 adres türet (gap limit artırıldı)
+            addresses = derive_addresses_from_xpub(BTC_WALLET_XPUB, count=50)
             
             if not addresses:
                 return {'success': False, 'error': 'Failed to derive addresses from xPub'}
             
-            # Her adresin bakiyesini topla
-            total_balance = 0
-            total_received = 0
-            total_sent = 0
-            active_addresses = []
-            
-            print(f"[HD Wallet] Checking {len(addresses)} addresses...")
-            
-            for addr in addresses:
-                balance_info = get_address_balance_mempool(addr)
-                
-                if balance_info['balance'] > 0 or balance_info['received'] > 0:
-                    print(f"[HD Wallet] {addr}: {balance_info['balance']} sat")
-                    active_addresses.append(addr)
-                
-                total_balance += balance_info['balance']
-                total_received += balance_info['received']
-                total_sent += balance_info['sent']
-                
-                # Rate limiting (Mempool.space allows ~5 req/s)
-                time.sleep(0.25)
-            
-            print(f"[HD Wallet] Total balance: {total_balance} sat ({len(active_addresses)} active addresses)")
-            
-            return {
-                'success': True,
-                'balance_btc': total_balance / 100000000,
-                'balance_satoshi': total_balance,
-                'total_received': total_received / 100000000,
-                'total_sent': total_sent / 100000000,
-                'wallet_type': 'xPub',
-                'active_addresses': active_addresses
-            }
+            print(f"[HD Wallet] Will check {len(addresses)} addresses...")
         
-        # Tek adres için Mempool.space kullan
         else:
-            print(f"[Single Address] Using address: {wallet_key[:12]}...")
-            balance_info = get_address_balance_mempool(wallet_key)
+            print(f"[Multi Address] Checking {len(addresses)} configured addresses...")
+        
+        # Her adresin bakiyesini topla
+        total_balance = 0
+        total_received = 0
+        total_sent = 0
+        active_addresses = []
+        checked_count = 0
+        
+        for addr in addresses:
+            balance_info = get_address_balance_mempool(addr)
+            checked_count += 1
             
-            return {
-                'success': True,
-                'balance_btc': balance_info['balance'] / 100000000,
-                'balance_satoshi': balance_info['balance'],
-                'total_received': balance_info['received'] / 100000000,
-                'total_sent': balance_info['sent'] / 100000000,
-                'wallet_type': 'Address'
-            }
+            if balance_info['balance'] > 0 or balance_info['received'] > 0:
+                print(f"[{checked_count}/{len(addresses)}] {addr}: {balance_info['balance']} sat (received: {balance_info['received']})")
+                active_addresses.append({
+                    'address': addr,
+                    'balance': balance_info['balance']
+                })
+            
+            total_balance += balance_info['balance']
+            total_received += balance_info['received']
+            total_sent += balance_info['sent']
+            
+            # Rate limiting (Mempool.space allows ~5 req/s)
+            time.sleep(0.2)
+            
+            # Progress log every 10 addresses
+            if checked_count % 10 == 0:
+                print(f"[Progress] Checked {checked_count}/{len(addresses)} addresses, found {len(active_addresses)} active")
+        
+        wallet_type = 'xPub' if use_xpub else ('Multi Address' if len(addresses) > 1 else 'Address')
+        
+        print(f"[RESULT] Total balance: {total_balance} sat ({total_balance/100000000:.8f} BTC)")
+        print(f"[RESULT] Active addresses: {len(active_addresses)}")
+        
+        return {
+            'success': True,
+            'balance_btc': total_balance / 100000000,
+            'balance_satoshi': total_balance,
+            'total_received': total_received / 100000000,
+            'total_sent': total_sent / 100000000,
+            'wallet_type': wallet_type,
+            'active_addresses': [a['address'] for a in active_addresses],
+            'active_count': len(active_addresses)
+        }
     
     except Exception as e:
         print(f"[BTC Balance Error] {e}")
@@ -371,10 +428,14 @@ def handle_btc_balance(ack, command, say):
             try_value = btc * price_data['try']
         
         wallet_display = ""
-        if BTC_WALLET_XPUB:
-            active_count = len(balance_data.get('active_addresses', []))
+        wallet_type = balance_data.get('wallet_type', 'Unknown')
+        active_count = balance_data.get('active_count', 0)
+        
+        if wallet_type == 'xPub':
             wallet_display = f"🔗 **Wallet Type:** xPub (HD Wallet)\n"
-            wallet_display += f"📍 **Aktif Adres Sayısı:** {active_count}\n"
+            wallet_display += f"📍 **Aktif Adres:** {active_count} adres\n"
+        elif wallet_type == 'Multi Address':
+            wallet_display = f"🔗 **Wallet Type:** Çoklu Adres ({active_count} aktif)\n"
         elif BTC_WALLET_ADDRESS:
             wallet_display = f"🔗 **Wallet:** `{BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}`\n"
         
@@ -575,8 +636,17 @@ if __name__ == "__main__":
     print(f"🔗 Linear Team: {LINEAR_TEAM_ID}")
     print(f"🤖 Cursor Agent: {CURSOR_AGENT_ID}")
     
-    if BTC_WALLET_XPUB:
+    # Wallet configuration summary
+    if BTC_WALLET_ADDRESSES:
+        addresses = [addr.strip() for addr in BTC_WALLET_ADDRESSES.split(',') if addr.strip()]
+        print(f"🪙 BTC Wallet: {len(addresses)} configured addresses")
+        for i, addr in enumerate(addresses[:3], 1):
+            print(f"   {i}. {addr[:8]}...{addr[-8:]}")
+        if len(addresses) > 3:
+            print(f"   ... and {len(addresses) - 3} more")
+    elif BTC_WALLET_XPUB:
         print(f"🪙 BTC Wallet: xPub ({BTC_WALLET_XPUB[:8]}...{BTC_WALLET_XPUB[-8:]})")
+        print(f"   Will scan 50 addresses (Legacy + Native SegWit)")
     elif BTC_WALLET_ADDRESS:
         print(f"🪙 BTC Wallet: {BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}")
     else:
