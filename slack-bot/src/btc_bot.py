@@ -18,6 +18,7 @@ LINEAR_API_KEY = os.getenv("LINEAR_API_KEY")
 LINEAR_TEAM_ID = os.getenv("LINEAR_TEAM_ID")
 CURSOR_AGENT_ID = os.getenv("CURSOR_AGENT_ID", "9bcf804d-d3b7-4a7d-841b-b10108f9f8d0")
 BTC_WALLET_ADDRESS = os.getenv("BTC_WALLET_ADDRESS", "")
+BTC_WALLET_XPUB = os.getenv("BTC_WALLET_XPUB", "")
 
 # ========================================
 # SLACK BOT SETUP
@@ -52,21 +53,25 @@ def get_btc_price():
 # ========================================
 # WALLET BALANCE (Blockchain.info API - Free)
 # ========================================
-def get_btc_balance(address):
-    """Blockchain.info'dan BTC bakiyesini çek"""
-    if not address:
-        return {'success': False, 'error': 'BTC wallet address not configured'}
+def get_btc_balance():
+    """Blockchain.info'dan BTC bakiyesini çek (xPub veya Address)"""
+    # xPub varsa onu kullan, yoksa tek adresi kullan
+    wallet_key = BTC_WALLET_XPUB if BTC_WALLET_XPUB else BTC_WALLET_ADDRESS
+    
+    if not wallet_key:
+        return {'success': False, 'error': 'BTC wallet address/xpub not configured'}
     
     try:
-        # Blockchain.info public API (no key needed)
-        url = f"https://blockchain.info/balance?active={address}"
+        # Blockchain.info public API (xpub ve address ikisini de destekler)
+        url = f"https://blockchain.info/balance?active={wallet_key}"
         req = urllib.request.Request(url)
         
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode('utf-8'))
             
-            if address in data:
-                wallet = data[address]
+            # xPub kullanıyorsak, tüm adreslerin toplamını al
+            if wallet_key in data:
+                wallet = data[wallet_key]
                 # Satoshi to BTC conversion (1 BTC = 100,000,000 satoshi)
                 balance_btc = wallet.get('final_balance', 0) / 100000000
                 
@@ -75,7 +80,8 @@ def get_btc_balance(address):
                     'balance_btc': balance_btc,
                     'balance_satoshi': wallet.get('final_balance', 0),
                     'total_received': wallet.get('total_received', 0) / 100000000,
-                    'total_sent': wallet.get('total_sent', 0) / 100000000
+                    'total_sent': wallet.get('total_sent', 0) / 100000000,
+                    'wallet_type': 'xPub' if BTC_WALLET_XPUB else 'Address'
                 }
     except Exception as e:
         print(f"[BTC Balance Error] {e}")
@@ -251,16 +257,18 @@ def handle_btc_balance(ack, command, say):
     """Cake Wallet BTC bakiyesini göster"""
     ack()
     
-    if not BTC_WALLET_ADDRESS:
+    if not BTC_WALLET_XPUB and not BTC_WALLET_ADDRESS:
         say(
-            f"⚠️ **Wallet Adresi Yapılandırılmamış**\n\n"
-            f"Railway'de `BTC_WALLET_ADDRESS` environment variable'ını ekle.\n\n"
-            f"**Örnek:**\n"
-            f"`BTC_WALLET_ADDRESS=1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa`"
+            f"⚠️ **Wallet Yapılandırılmamış**\n\n"
+            f"Railway'de `BTC_WALLET_XPUB` veya `BTC_WALLET_ADDRESS` environment variable'ını ekle.\n\n"
+            f"**Örnek (xPub - Önerilen):**\n"
+            f"`BTC_WALLET_XPUB=xpub6C...`\n\n"
+            f"**Veya tek adres:**\n"
+            f"`BTC_WALLET_ADDRESS=bc1q...`"
         )
         return
     
-    balance_data = get_btc_balance(BTC_WALLET_ADDRESS)
+    balance_data = get_btc_balance()
     
     if balance_data['success']:
         btc = balance_data['balance_btc']
@@ -277,6 +285,12 @@ def handle_btc_balance(ack, command, say):
             usd_value = btc * price_data['usd']
             try_value = btc * price_data['try']
         
+        wallet_display = ""
+        if BTC_WALLET_XPUB:
+            wallet_display = f"🔗 **Wallet Type:** xPub (Tüm Adresler)\n"
+        elif BTC_WALLET_ADDRESS:
+            wallet_display = f"🔗 **Wallet:** `{BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}`\n"
+        
         say(
             f"💼 **Cake Wallet BTC Bakiyesi**\n\n"
             f"🪙 **BTC:** `{btc:.8f}` BTC\n"
@@ -285,7 +299,7 @@ def handle_btc_balance(ack, command, say):
             f"💷 **TRY Değeri:** ₺{try_value:,.2f}\n\n"
             f"📥 **Toplam Alınan:** `{received:.8f}` BTC\n"
             f"📤 **Toplam Gönderilen:** `{sent:.8f}` BTC\n\n"
-            f"🔗 **Wallet:** `{BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}`\n"
+            f"{wallet_display}"
             f"⏰ **Zaman:** {time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
     else:
@@ -301,8 +315,8 @@ def handle_btc_stats(ack, command, say):
     
     # Bakiye verisi
     balance_data = {'success': False}
-    if BTC_WALLET_ADDRESS:
-        balance_data = get_btc_balance(BTC_WALLET_ADDRESS)
+    if BTC_WALLET_XPUB or BTC_WALLET_ADDRESS:
+        balance_data = get_btc_balance()
     
     # Mesajı oluştur
     message = f"📊 **Bitcoin Özet Rapor**\n\n"
@@ -339,10 +353,10 @@ def handle_btc_stats(ack, command, say):
             f"• USD: ${usd_value:,.2f}\n"
             f"• TRY: ₺{try_value:,.2f}\n\n"
         )
-    elif BTC_WALLET_ADDRESS:
+    elif BTC_WALLET_XPUB or BTC_WALLET_ADDRESS:
         message += f"❌ Bakiye verisi alınamadı\n\n"
     else:
-        message += f"⚠️ Wallet adresi yapılandırılmamış\n\n"
+        message += f"⚠️ Wallet yapılandırılmamış\n\n"
     
     message += f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
     
@@ -473,7 +487,13 @@ if __name__ == "__main__":
     print(f"🚀 {PROJECT_NAME} Slack Bot starting...")
     print(f"🔗 Linear Team: {LINEAR_TEAM_ID}")
     print(f"🤖 Cursor Agent: {CURSOR_AGENT_ID}")
-    print(f"🪙 BTC Wallet: {BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:] if BTC_WALLET_ADDRESS else 'Not configured'}")
+    
+    if BTC_WALLET_XPUB:
+        print(f"🪙 BTC Wallet: xPub ({BTC_WALLET_XPUB[:8]}...{BTC_WALLET_XPUB[-8:]})")
+    elif BTC_WALLET_ADDRESS:
+        print(f"🪙 BTC Wallet: {BTC_WALLET_ADDRESS[:8]}...{BTC_WALLET_ADDRESS[-8:]}")
+    else:
+        print(f"⚠️ BTC Wallet: Not configured")
     
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     handler.start()
